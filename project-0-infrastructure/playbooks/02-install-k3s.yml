@@ -1,0 +1,113 @@
+---
+# 1. Déploiement du Control Plane : cp-01
+- name: Installer k3s serveur sur le control plane
+  hosts: k3s_server
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Vérifier si k3s est déjà installé
+      ansible.builtin.stat:
+        path: /usr/local/bin/k3s
+      register: k3s_server_binary
+
+    - name: Installer k3s server
+      ansible.builtin.shell: >
+        curl -sfL https://get.k3s.io |
+        INSTALL_K3S_EXEC="server
+        --node-ip={{ ansible_host }}
+        --bind-address={{ ansible_host }}
+        --advertise-address={{ ansible_host }}
+        --flannel-iface=enp0s8
+        --write-kubeconfig-mode=644"
+        sh -
+      args:
+        creates: /usr/local/bin/k3s
+      when: not k3s_server_binary.stat.exists
+
+    - name: Attendre que le token de jonction soit généré
+      ansible.builtin.wait_for:
+        path: /var/lib/rancher/k3s/server/node-token
+        timeout: 180
+
+    - name: Lire le token de jonction
+      ansible.builtin.slurp:
+        src: /var/lib/rancher/k3s/server/node-token
+      register: node_token_b64
+      no_log: true
+
+    - name: Mettre le token à disposition des workers
+      ansible.builtin.set_fact:
+        k3s_token: "{{ node_token_b64.content | b64decode | trim }}"
+      no_log: true
+
+# 2. Déploiement des workers : worker-01 et worker-02
+- name: Joindre les agents k3s au cluster
+  hosts: k3s_agents
+  become: true
+  gather_facts: true
+
+  vars:
+    k3s_server_name: "{{ groups['k3s_server'][0] }}"
+    k3s_server_ip: "{{ hostvars[k3s_server_name].ansible_host }}"
+    k3s_join_token: "{{ hostvars[k3s_server_name].k3s_token }}"
+
+  tasks:
+    - name: Vérifier si k3s est déjà installé sur le worker
+      ansible.builtin.stat:
+        path: /usr/local/bin/k3s
+      register: k3s_agent_binary
+
+    - name: Installer et joindre l'agent k3s
+      ansible.builtin.shell: >
+        curl -sfL https://get.k3s.io |
+        K3S_URL="https://{{ k3s_server_ip }}:6443"
+        K3S_TOKEN="{{ k3s_join_token }}"
+        INSTALL_K3S_EXEC="agent
+        --node-ip={{ ansible_host }}
+        --flannel-iface=enp0s8"
+        sh -
+      args:
+        creates: /usr/local/bin/k3s
+      when: not k3s_agent_binary.stat.exists
+      no_log: true
+
+# 3. Récupération du kubeconfig depuis cp-01 vers WSL
+- name: Configurer kubectl local depuis WSL
+  hosts: k3s_server
+  become: true
+  gather_facts: false
+
+  vars:
+    local_kube_dir: "{{ lookup('env', 'HOME') }}/.kube"
+    local_kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/config"
+
+  tasks:
+    - name: Créer le répertoire kubeconfig dans WSL
+      delegate_to: localhost
+      become: false
+      ansible.builtin.file:
+        path: "{{ local_kube_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Récupérer le kubeconfig depuis le control plane
+      ansible.builtin.fetch:
+        src: /etc/rancher/k3s/k3s.yaml
+        dest: "{{ local_kubeconfig }}"
+        flat: true
+
+    - name: Remplacer 127.0.0.1 par l'adresse du control plane
+      delegate_to: localhost
+      become: false
+      ansible.builtin.replace:
+        path: "{{ local_kubeconfig }}"
+        regexp: "127\\.0\\.0\\.1"
+        replace: "{{ ansible_host }}"
+
+    - name: Restreindre les droits du kubeconfig local
+      delegate_to: localhost
+      become: false
+      ansible.builtin.file:
+        path: "{{ local_kubeconfig }}"
+        mode: "0600"

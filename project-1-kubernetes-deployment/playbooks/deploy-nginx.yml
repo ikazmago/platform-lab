@@ -1,0 +1,54 @@
+---
+- name: Deploy Nginx manifests to Kubernetes
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    kubeconfig_path: "{{ lookup('env', 'HOME') }}/.kube/config"
+    project_dir: "{{ playbook_dir }}/.."
+
+  tasks:
+    - name: Apply the demo namespace
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ project_dir }}/kubernetes/namespaces/demo.yml"
+        kubeconfig: "{{ kubeconfig_path }}"
+
+    - name: Apply the Nginx Deployment and Service
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ item }}"
+        kubeconfig: "{{ kubeconfig_path }}"
+      loop:
+        - "{{ project_dir }}/kubernetes/apps/nginx/deployment.yml"
+        - "{{ project_dir }}/kubernetes/apps/nginx/service.yml"
+
+    - name: Read Nginx Deployment information
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: nginx-demo
+        namespace: demo
+        kubeconfig: "{{ kubeconfig_path }}"
+      register: nginx_deployment
+      until:
+        - nginx_deployment.resources | length > 0
+        - nginx_deployment.resources[0].status.availableReplicas | default(0) | int == 2
+      retries: 18
+      delay: 5
+
+    - name: Read Nginx Service information
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Service
+        name: nginx-demo-service
+        namespace: demo
+        kubeconfig: "{{ kubeconfig_path }}"
+      register: nginx_service
+
+    - name: Display NodePort
+      ansible.builtin.debug:
+        msg: >-
+          Nginx is available on NodePort
+          {{ nginx_service.resources[0].spec.ports[0].nodePort }}.

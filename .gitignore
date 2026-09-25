@@ -1,0 +1,15 @@
+# Secrets et configs sensibles
+.kube/config
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
+
+# Fichiers locaux / logs
+*.log
+.DS_Store
+
+# Environnements virtuels Python (si utilisés plus tard)
+venv/
+.venv/
